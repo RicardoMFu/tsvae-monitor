@@ -1,0 +1,47 @@
+# ============================================
+# 数据文件（敏感/大体积，不上传）
+# ============================================
+TBM_Cutter_Wear_Project/data/raw/
+TBM_Cutter_Wear_Project/data/processed/steady_*.csv
+TBM_Cutter_Wear_Project/data/processed/features_steady_*.csv
+
+# 模型权重（可按需上传预训练版本）
+TBM_Cutter_Wear_Project/results/module3/tsvae_model.pt
+models/tsvae_model.pt
+
+# ============================================
+# Python
+# ============================================
+__pycache__/
+*.pyc
+*.egg-info/
+*.egg
+.pytest_cache/
+
+# ============================================
+# LaTeX 编译产物
+# ============================================
+*.aux
+*.log
+*.synctex.gz
+*.toc
+*.out
+
+# ============================================
+# 操作系统
+# ============================================
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ============================================
+# IDE
+# ============================================
+.vscode/settings.json
+.idea/
+
+# ============================================
+# 可选：保留空目录结构
+# ============================================
+# data/raw/.gitkeep
+# data/processed/.gitkeep
