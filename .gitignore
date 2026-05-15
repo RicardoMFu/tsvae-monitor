@@ -1,7 +1,8 @@
 # ============================================
 # 数据文件（敏感/大体积，不上传）
 # ============================================
-TBM_Cutter_Wear_Project/data/raw/
+TBM_Cutter_Wear_Project/data/raw/*
+TBM_Cutter_Wear_Project/data/raw/.gitkeep
 TBM_Cutter_Wear_Project/data/processed/steady_*.csv
 TBM_Cutter_Wear_Project/data/processed/features_steady_*.csv
 
@@ -39,9 +40,3 @@ desktop.ini
 # ============================================
 .vscode/settings.json
 .idea/
-
-# ============================================
-# 可选：保留空目录结构
-# ============================================
-# data/raw/.gitkeep
-# data/processed/.gitkeep
