@@ -41,8 +41,8 @@ except ImportError:
     HAS_UMAP = False
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-DATA_DIR = Path("TBM_Cutter_Wear_Project/data/processed")
-RESULTS_DIR = Path("TBM_Cutter_Wear_Project/results/module3")
+DATA_DIR = Path("data/processed")
+RESULTS_DIR = Path("results/module3")
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 FIG_DIR = RESULTS_DIR / "figures"
 FIG_DIR.mkdir(exist_ok=True)
@@ -67,7 +67,14 @@ print(f"[TS-VAE v3.0] 设备: {DEVICE} | 步长: S={STEP_SIZE}s (优化)")
 # =============================================================================
 
 def load_and_engineer_features() -> pd.DataFrame:
-    """加载5日数据并计算物理特征"""
+    """加载5日数据并计算7维全局独立核心特征
+
+    7D特征构成（物理导向特征平替原则）：
+      机械/能效簇（3个高阶不变量）：SE, FPI, TPI
+      电气簇（1个）：P2.1泵电流
+      热力簇（1个）：主油箱油温
+      流体簇（2个）：泥水仓顶部1压力, 排浆密度
+    """
     day_files = [
         (DATA_DIR / "steady_260207.csv", "2026-02-07", 121),
         (DATA_DIR / "steady_260208.csv", "2026-02-08", 123),
@@ -76,35 +83,42 @@ def load_and_engineer_features() -> pd.DataFrame:
         (DATA_DIR / "steady_260211.csv", "2026-02-11", 129),
     ]
     all_rows = []
+    D_cutter = 6.9
+    CUTTERHEAD_AREA = 188.7
+    EPSILON = 1e-6
+
     for fpath, date_str, base_ring in day_files:
         print(f"  加载 {fpath.name} ...")
         df = pd.read_csv(fpath, low_memory=False)
         df['date'] = pd.to_datetime(df['日期'])
         df['ring_id'] = df['环号']
 
-        D_cutter = 6.9
         F_v = df['总推进力'].values.astype(np.float64)
+        torque = df['刀盘扭矩'].values.astype(np.float64)
         v_fwd = df['推进速度'].values.astype(np.float64)
         RPM = df['刀盘转速'].values.astype(np.float64)
+
         with np.errstate(divide='ignore', invalid='ignore'):
-            fpi = np.where(RPM > 0, v_fwd / (RPM + 1e-6), np.nan)
-            area = np.pi * (D_cutter / 2) ** 2
-            se = np.where(area > 0, F_v * v_fwd / area, np.nan)
-        torque = df['刀盘扭矩'].values.astype(np.float64)
+            p_calc = np.where(RPM > 0, v_fwd / (RPM + EPSILON), np.nan)
+            # SE = (F_v/A) + 2π·T/(A·p)
+            se = np.where(np.isfinite(p_calc),
+                         (F_v / CUTTERHEAD_AREA) + (2 * np.pi * torque) / (CUTTERHEAD_AREA * (p_calc + EPSILON)),
+                         np.nan)
+            fpi = np.where(np.isfinite(p_calc), F_v / (p_calc + EPSILON), np.nan)
+            tpi = np.where(np.isfinite(p_calc), torque / (p_calc + EPSILON), np.nan)
+
         I_p21 = df['P2.1泵电流'].values.astype(np.float64)
         T_oil = df['主油箱油温'].values.astype(np.float64)
-        power_proxy = torque * RPM
+        P_slurry_top = df['泥水仓顶部1压力'].values.astype(np.float64)
+        rho_out = df['排浆密度'].values.astype(np.float64)
 
         df['SE'] = se
         df['FPI'] = fpi
-        df['TPI'] = fpi
-        df['F_v'] = F_v
-        df['T_current'] = torque
-        df['I_p21'] = I_p21
-        df['T_oil'] = T_oil
-        df['power_proxy'] = power_proxy
-        df['v_forward'] = v_fwd
-        df['RPM'] = RPM
+        df['TPI'] = tpi
+        df['P2.1泵电流'] = I_p21
+        df['主油箱油温'] = T_oil
+        df['泥水仓顶部1压力'] = P_slurry_top
+        df['排浆密度'] = rho_out
         all_rows.append(df)
 
     df_full = pd.concat(all_rows, ignore_index=True)
@@ -112,8 +126,18 @@ def load_and_engineer_features() -> pd.DataFrame:
     return df_full
 
 
+FINAL_7D = ['SE', 'FPI', 'TPI', 'P2.1泵电流', '主油箱油温', '泥水仓顶部1压力', '排浆密度']
+
+
 def build_core_feature_matrix(df: pd.DataFrame):
-    CORE_COLS = ['SE','FPI','TPI','F_v','T_current','I_p21','T_oil','power_proxy','v_forward','RPM']
+    """构建7维全局独立核心特征矩阵
+
+    严格遵循物理导向特征平替原则：
+      - 3个高阶不变量：SE, FPI, TPI（机械/能效簇派生）
+      - 4个跨域独立代理：P2.1泵电流(电气), 主油箱油温(热力),
+                          泥水仓顶部1压力, 排浆密度(流体)
+    """
+    CORE_COLS = FINAL_7D
     for col in CORE_COLS:
         if col not in df.columns:
             df[col] = 0.0
@@ -126,6 +150,7 @@ def build_core_feature_matrix(df: pd.DataFrame):
     df_scaled['ring_id'] = df['ring_id'].values
     df_scaled['date'] = df['date'].values
     print(f"  特征矩阵: {df_scaled.shape}, 通道: {CORE_COLS}")
+    print(f"  输入压缩比: {len(CORE_COLS)}/{LATENT_DIM} = {len(CORE_COLS)/LATENT_DIM:.3f}")
     return df_scaled, CORE_COLS, scaler
 
 
@@ -183,7 +208,7 @@ class EncoderGRU(nn.Module):
 
 
 class DecoderGRU(nn.Module):
-    def __init__(self, latent_dim, hidden_size=64, num_layers=2, output_size=10,
+    def __init__(self, latent_dim, hidden_size=64, num_layers=2, output_size=7,
                  seq_len=60, dropout=0.1):
         super().__init__()
         self.seq_len = seq_len
@@ -377,7 +402,7 @@ def plot_multichannel_reconstruction(df_scaled, model, scaler, CORE_COLS, device
         win = scaler.transform(win)
         windows[name] = win
 
-    channels = ['SE', 'I_p21', 'F_v']
+    channels = ['SE', 'P2.1泵电流', '主油箱油温']
     fig, axes = plt.subplots(len(channels), 1, figsize=(14, 10), sharex=True)
     if len(channels) == 1:
         axes = [axes]
@@ -487,10 +512,10 @@ def plot_feature_loss_contribution(df_scaled, model, scaler, CORE_COLS,
     model.eval()
 
     PHY_GROUPS = {
-        '机械': ['F_v', 'T_current', 'v_forward', 'RPM'],
-        '电气': ['I_p21', 'power_proxy'],
-        '热力': ['T_oil'],
-        '能效': ['SE', 'FPI', 'TPI'],
+        '能效/机械': ['SE', 'FPI', 'TPI'],
+        '电气': ['P2.1泵电流'],
+        '热力': ['主油箱油温'],
+        '流体': ['泥水仓顶部1压力', '排浆密度'],
     }
 
     ring_mse_matrix = {grp: {} for grp in PHY_GROUPS}

@@ -55,6 +55,16 @@ ALL_CLUSTERS = MECHANIC_CLUSTER + ELECTRIC_CLUSTER + THERMAL_CLUSTER + FLUID_CLU
 CUTTERHEAD_AREA = 188.7  # 刀盘截面积 (m²)，直径15.5m盾构机
 EPSILON = 1e-6  # 防止除零溢出
 
+# =====================================================================
+# 7维全局独立核心特征（物理导向特征平替原则）
+# 3个高阶不变量（机械/能效簇派生）：
+#   SE (切削比能), FPI (推力贯入度指数), TPI (扭矩贯入度指数)
+# 4个跨域物理代理（电气/热力/流体簇相关性筛选）：
+#   P2.1泵电流 (电气), 主油箱油温 (热力),
+#   泥水仓顶部1压力 (流体), 排浆密度 (流体)
+# =====================================================================
+FINAL_7D = ['SE', 'FPI', 'TPI', 'P2.1泵电流', '主油箱油温', '泥水仓顶部1压力', '排浆密度']
+
 
 # =====================================================================
 # 特征工程核心函数
@@ -116,59 +126,61 @@ def compute_physics_informed_features(df: pd.DataFrame) -> pd.DataFrame:
     # 单位: Fv(kN), T(kN·m), p(mm/rev), A(m²)
     # 结果单位: kN/m² = kPa (比能密度)
     SE = (Fv / CUTTERHEAD_AREA) + (2 * np.pi * T) / (CUTTERHEAD_AREA * (p_valid + EPSILON))
-    df['SE_切削比能'] = np.where(np.isfinite(SE), SE, np.nan)
+    df['SE'] = np.where(np.isfinite(SE), SE, np.nan)
 
     # ===== 3. 推力贯入度指数 FPI = Fv / p =====
     FPI = Fv / (p_valid + EPSILON)
-    df['FPI_推力贯入度指数'] = np.where(np.isfinite(FPI), FPI, np.nan)
+    df['FPI'] = np.where(np.isfinite(FPI), FPI, np.nan)
 
     # ===== 4. 扭矩贯入度指数 TPI = T / p =====
     TPI = T / (p_valid + EPSILON)
-    df['TPI_扭矩贯入度指数'] = np.where(np.isfinite(TPI), TPI, np.nan)
-
-    # ===== 5. 额外物理特征 =====
-
-    # 推进功率 (kW): Fv * v / 60 / 1000
-    thrust_power = Fv * v / 60000
-    df['推进功率_kW'] = thrust_power
-
-    # 旋转功率 (kW): 2π·T·n / 60
-    rotation_power = 2 * np.pi * T * n / 60
-    df['旋转功率_kW'] = rotation_power
-
-    # 总机械功率
-    df['总机械功率_kW'] = thrust_power + rotation_power
-
-    # 能量比 (旋转/推进)
-    energy_ratio = rotation_power / (thrust_power + EPSILON)
-    df['能量比_旋转_推进'] = np.where(np.isfinite(energy_ratio), energy_ratio, np.nan)
+    df['TPI'] = np.where(np.isfinite(TPI), TPI, np.nan)
 
     return df
 
 
+def select_final_7d_features(df: pd.DataFrame) -> pd.DataFrame:
+    """严格选取7维全局独立核心特征（物理导向特征平替原则）
+
+    7维特征构成：
+      机械/能效簇（3个高阶不变量）：SE, FPI, TPI
+      电气簇（1个）：P2.1泵电流
+      热力簇（1个）：主油箱油温
+      流体簇（2个）：泥水仓顶部1压力, 排浆密度
+
+    Args:
+        df: 含完整原始列和派生特征的DataFrame
+
+    Returns:
+        仅含7维核心特征的DataFrame
+    """
+    df_7d = df[FINAL_7D].copy()
+    df_7d = df_7d.apply(pd.to_numeric, errors='coerce')
+    return df_7d
+
+
 def compute_ring_aggregations(
     df: pd.DataFrame,
-    ring_col: str = '环号'
+    ring_col: str = '环号',
+    feature_cols: list = None
 ) -> pd.DataFrame:
     """按环号进行统计聚合，为无监督学习准备特征矩阵
 
     Args:
         df: 添加物理特征后的DataFrame
         ring_col: 环号列名
+        feature_cols: 指定要聚合的特征列（默认使用FINAL_7D）
 
     Returns:
         环级聚合特征矩阵，形状为 (环数, 特征数)
     """
-    # 选择需要聚合的列（排除元数据列）
-    exclude_cols = ['日期', '时间', '环号', '掘进时间', '行程']
-    agg_cols = [c for c in df.columns if c not in exclude_cols and not c.endswith('_计算')]
+    if feature_cols is None:
+        feature_cols = FINAL_7D
 
-    # 统计函数列表
-    agg_funcs = {
-        col: ['mean', 'std', 'skew', 'kurtosis'] for col in agg_cols
-    }
+    # 过滤仅存在的列
+    agg_cols = [c for c in feature_cols if c in df.columns]
 
-    # 执行分组聚合（仅保留均值和标准差，避免kurtosis兼容性问题）
+    # 执行分组聚合（均值和标准差）
     ring_features = df.groupby(ring_col)[agg_cols].agg(['mean', 'std'])
 
     # 展平多级列名
@@ -184,7 +196,12 @@ def process_five_days_feature_engineering(
     data_dir: str = "TBM_Cutter_Wear_Project/data/processed",
     output_dir: str = "TBM_Cutter_Wear_Project/data/processed",
 ) -> Dict[str, pd.DataFrame]:
-    """处理五日数据，完成模块二特征工程
+    """处理五日数据，完成模块二特征工程（7D版本）
+
+    严格遵循"物理导向的特征平替原则"：
+      - 保留3个高阶不变量（SE, FPI, TPI）
+      - 强制剔除参与计算的底层机械参数
+      - 从电气/热力/流体簇选取4个跨域独立特征
 
     Args:
         data_dir: 清洗后数据目录
@@ -194,6 +211,7 @@ def process_five_days_feature_engineering(
         各日特征工程结果统计
     """
     from pathlib import Path
+    import os
 
     os.makedirs(output_dir, exist_ok=True)
     data_path = Path(data_dir)
@@ -202,7 +220,7 @@ def process_five_days_feature_engineering(
     results = {}
 
     print("=" * 60)
-    print("模块二：多物理场分组与特征衍生")
+    print("模块二：多物理场分组与7维特征衍生")
     print("=" * 60)
 
     for day_file in day_files:
@@ -218,16 +236,19 @@ def process_five_days_feature_engineering(
               f"热力{len(available['thermal'])} "
               f"流体{len(available['fluid'])}")
 
-        # Step 2: 注入物理先验特征
+        # Step 2: 注入物理先验特征（SE, FPI, TPI）
         df_phys = compute_physics_informed_features(df)
 
-        # 显示新特征统计
-        print(f"  新增特征: SE={df_phys['SE_切削比能'].mean():.1f} kPa, "
-              f"FPI={df_phys['FPI_推力贯入度指数'].mean():.1f}, "
-              f"TPI={df_phys['TPI_扭矩贯入度指数'].mean():.1f}")
+        # Step 3: 严格选取7维核心特征
+        df_7d = select_final_7d_features(df_phys)
 
-        # Step 3: 按环聚合
-        ring_features = compute_ring_aggregations(df_phys)
+        # 显示新特征统计
+        print(f"  7维特征: SE={df_7d['SE'].mean():.1f} kPa, "
+              f"FPI={df_7d['FPI'].mean():.1f}, "
+              f"TPI={df_7d['TPI'].mean():.1f}")
+
+        # Step 4: 按环聚合（仅7维特征）
+        ring_features = compute_ring_aggregations(df_7d.reset_index())
 
         # 保存环级特征
         out_path = Path(output_dir) / f"features_{day_file.stem}.csv"
@@ -246,8 +267,10 @@ def process_five_days_feature_engineering(
 
     # 汇总
     print(f"\n{'='*60}")
-    print("特征工程汇总")
+    print("特征工程汇总（7维全局独立特征）")
     print(f"{'='*60}")
+    print(f"  特征维度: {len(FINAL_7D)} (3高阶不变量 + 4跨域代理)")
+    print(f"  特征列表: {FINAL_7D}")
     total_rings = sum(v['环数'] for v in results.values())
     total_features = max(v['特征列数'] for v in results.values())
     print(f"  总环数: {total_rings}")

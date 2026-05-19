@@ -40,3 +40,9 @@ desktop.ini
 # ============================================
 .vscode/settings.json
 .idea/
+# ============================================
+# Claude (internal only, not for public repo)
+# ============================================
+CLAUDE.md
+TBM_Cutter_Wear_Project/CLAUDE.md
+
